@@ -245,7 +245,7 @@ export class DiscordTrigger implements INodeType {
                 });
 
                 // disable the node if the workflow is not activated, but keep it running if it was just the test node
-                if (!isActive || this.getActivationMode() !== 'manual') {
+                if (!isActive && this.getActivationMode() !== 'manual') {
                     console.log('Workflow stopped. Disconnecting bot...');
                     ipc.disconnect('bot');
                 }

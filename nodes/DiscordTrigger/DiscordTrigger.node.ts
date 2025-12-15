@@ -4,6 +4,7 @@ import {
     type ITriggerFunctions,
     type ITriggerResponse,
     type INodePropertyOptions,
+    NodeConnectionType,
     NodeOperationError,
 } from 'n8n-workflow';
 import { options } from './DiscordTrigger.node.options';
@@ -17,7 +18,7 @@ import {
     getRoles as getRolesHelper,
     getGuilds as getGuildsHelper,
 } from '../helper';
-import settings from '../settings';
+import { connectionManager } from '../connectionManager';
 
 // we start the bot if we are in the main process
 if (!process.send) bot();
@@ -33,8 +34,9 @@ export class DiscordTrigger implements INodeType {
             name: 'Discord Trigger',
         },
         icon: 'file:discord-logo.svg',
-        inputs: [],
-        outputs: ['main'],
+    inputs: [],
+    // eslint-disable-next-line n8n-nodes-base/node-class-description-outputs-wrong
+    outputs: [NodeConnectionType.Main],
         credentials: [
             {
                 name: 'discordBotTriggerApi',
@@ -87,19 +89,34 @@ export class DiscordTrigger implements INodeType {
 
         ipc.connectTo('bot', () => {
             console.log('Connected to IPC server');
-
+            
+            const currentNodeId = this.getNode().id;
+            
+            // Check if this node is already registered to prevent duplicate event listeners
+            // This can happen when a workflow is reactivated while the IPC connection is still alive
+            const isNewRegistration = connectionManager.connect(currentNodeId);
+            
             const parameters: any = {};
             Object.keys(this.getNode().parameters).forEach((key) => {
                 parameters[key] = this.getNodeParameter(key, '') as any;
             });
 
+            // Always emit triggerNodeRegistered to update the bot's node parameters
+            // (in case they changed between activations)
             ipc.of.bot.emit('triggerNodeRegistered', {
                 parameters,
                 active: this.getWorkflow().active,
                 credentials,
                 token: credentials.token,
-                nodeId: this.getNode().id, // Unique to each node
+                nodeId: currentNodeId,
             });
+
+            // Skip adding event listeners if this node is already registered
+            // to prevent duplicate events
+            if (!isNewRegistration) {
+                console.log(`Node ${currentNodeId} already has listeners registered. Skipping.`);
+                return;
+            }
 
             ipc.of.bot.on('messageCreate', ({ message, author, guild, nodeId, messageReference, attachments, referenceAuthor }: any) => {
                 if( this.getNode().id === nodeId) {
@@ -237,18 +254,17 @@ export class DiscordTrigger implements INodeType {
                 // remove the node from being executed
                 console.log("removing trigger node");
 
-                delete settings.triggerNodes[this.getNode().id];
+                const currentNodeId = this.getNode().id;
+                const shouldDisconnect = !isActive || this.getActivationMode() !== 'manual';
 
-                // Send message to bot process to deregister this node
+                // Send message to bot process to deregister this node, then disconnect if needed
                 ipc.connectTo('bot', () => {
-                    ipc.of.bot.emit('triggerNodeRemoved', { nodeId: this.getNode().id });
+                    ipc.of.bot.emit('triggerNodeRemoved', { nodeId: currentNodeId });
+                    // Disconnect after the message is sent
+                    if (shouldDisconnect) {
+                        connectionManager.disconnect(currentNodeId);
+                    }
                 });
-
-                // disable the node if the workflow is not activated, but keep it running if it was just the test node
-                if (!isActive && this.getActivationMode() !== 'manual') {
-                    console.log('Workflow stopped. Disconnecting bot...');
-                    ipc.disconnect('bot');
-                }
             },
         };
     }
